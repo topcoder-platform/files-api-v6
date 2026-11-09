@@ -6,7 +6,10 @@ RUN npm ci --ignore-scripts --no-fund
 COPY nest-cli.json tsconfig*.json jest.config.json eslint.config.mjs .prettierrc.json ./
 COPY src ./src
 COPY scripts ./scripts
-RUN npm run lint && npm test && npm run build && npm prune --omit=dev --ignore-scripts
+# The dependency's upstream lock describes its development workspace. Keep the
+# installed package metadata/code and omit this unused lock from the runtime image.
+RUN npm run lint && npm test && npm run build && npm prune --omit=dev --ignore-scripts \
+    && rm -f node_modules/tc-core-library-js/pnpm-lock.yaml
 
 FROM alpine:3.24 AS runtime
 RUN apk upgrade --no-cache && apk add --no-cache 'nodejs-current~26' \
