@@ -1,0 +1,63 @@
+{
+  "name": "files-api-v6",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Authenticated Uppy S3 signing and durable attachment downloads",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=26.12.1"
+  },
+  "scripts": {
+    "build": "node node_modules/typescript-native/bin/tsc -p tsconfig.build.json",
+    "start": "node dist/main.js",
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --config jest.config.json --runInBand",
+    "lint": "eslint src && prettier --check \"src/**/*.ts\"",
+    "start:dev": "nest start --watch",
+    "start:debug": "nest start --debug --watch",
+    "start:prod": "node dist/main.js",
+    "format": "prettier --write \"src/**/*.ts\""
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "3.1090.0",
+    "@aws-sdk/s3-request-presigner": "3.1090.0",
+    "@nestjs/common": "12.4.2",
+    "@nestjs/core": "12.4.2",
+    "@nestjs/platform-express": "12.4.2",
+    "class-transformer": "0.5.1",
+    "class-validator": "0.14.4",
+    "reflect-metadata": "0.2.2",
+    "rxjs": "7.8.2",
+    "tc-core-library-js": "https://codeload.github.com/topcoder-platform/tc-core-library-js/tar.gz/c2df92b2227089909ab6e229df0ec6b658bb431a",
+    "express": "5.2.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@nestjs/testing": "12.4.2",
+    "@swc/core": "1.16.22",
+    "@swc/jest": "0.2.39",
+    "@types/express": "5.0.6",
+    "@types/jest": "30.0.0",
+    "@types/node": "26.6.6",
+    "@types/supertest": "7.2.1",
+    "eslint": "10.14.0",
+    "globals": "17.14.0",
+    "jest": "30.5.2",
+    "prettier": "3.9.10",
+    "supertest": "7.3.2",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.72.2",
+    "@nestjs/cli": "12.0.12",
+    "@nestjs/schematics": "12.0.13",
+    "typescript-native": "npm:typescript@7.0.2"
+  },
+  "overrides": {
+    "multer": "2.5.0",
+    "glob": {
+      "minimatch": "11.0.1"
+    },
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": "11.0.1"
+    },
+    "glob@>=9": "14.0.2"
+  }
+}

@@ -1,0 +1,17 @@
+.git
+node_modules
+dist
+coverage
+.env*
+private
+infra
+infrastructure
+deploy
+*.pem
+*.key
+*-manifest.json
+*-baseline.json
+*-receipt.json
+
+**/__pycache__
+*.pyc

@@ -1,0 +1,105 @@
+version: 2.1
+executors:
+  reviewed:
+    docker:
+      - image: cimg/aws@sha256:4cf3768db00ddf9bc439b8c84e8a60c11a14edf81c8baf76f74132144f8340d5
+commands:
+  checkout-source:
+    steps:
+      - run:
+          name: Check out the exact public source commit
+          command: |
+            set -euo pipefail
+            [[ "$CIRCLE_SHA1" =~ ^[0-9a-f]{40}$ ]]
+            export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0
+            git init --quiet .
+            git remote add origin https://github.com/topcoder-platform/files-api-v6.git
+            git -c credential.helper= fetch --quiet --depth 1 origin "$CIRCLE_SHA1"
+            git checkout --quiet --detach FETCH_HEAD
+            test "$(git rev-parse HEAD)" = "$CIRCLE_SHA1"
+  checkout-suite:
+    steps:
+      - run:
+          name: Verify deployment suite v2.0.10
+          command: |
+            set -euo pipefail
+            git init --quiet /tmp/tc-deploy-scripts
+            git -C /tmp/tc-deploy-scripts remote add origin https://github.com/topcoder-platform/tc-deploy-scripts.git
+            git -C /tmp/tc-deploy-scripts fetch --quiet --depth 1 origin refs/tags/v2.0.10
+            git -C /tmp/tc-deploy-scripts checkout --quiet --detach FETCH_HEAD
+            test "$(git -C /tmp/tc-deploy-scripts rev-parse HEAD)" = e81a6772a33819c1b57c88a95d04494e59c559b8
+jobs:
+  build:
+    executor: reviewed
+    steps:
+      - checkout-source
+      - setup_remote_docker
+      - checkout-suite
+      - run:
+          name: Test and build without AWS credentials
+          command: |
+            set -euo pipefail
+            python3 -m unittest discover -s scripts -p 'test_*.py' -v
+            python3 -I /tmp/tc-deploy-scripts/build_image.py --dockerfile Dockerfile --image files-api-v6:candidate
+            mkdir -p /tmp/release
+            docker save --output /tmp/release/image.tar files-api-v6:candidate
+          no_output_timeout: 30m
+      - persist_to_workspace:
+          root: /tmp/release
+          paths: [image.tar]
+  deploy:
+    executor: reviewed
+    parameters:
+      environment:
+        type: enum
+        enum: [dev, prod]
+    environment:
+      DEPLOY_ENV: << parameters.environment >>
+    steps:
+      - checkout-source
+      - setup_remote_docker
+      - checkout-suite
+      - attach_workspace:
+          at: /tmp/release
+      - run:
+          name: Deploy a scanned digest using repository-bound OIDC
+          command: |
+            set +x
+            set -euo pipefail
+            docker load --input /tmp/release/image.tar
+            python3 -I scripts/release.py
+          no_output_timeout: 45m
+workflows:
+  release:
+    jobs:
+      - build
+      - deploy:
+          name: deploy-dev
+          environment: dev
+          requires: [build]
+          context: files-api-v6-dev-deploy
+          serial-group: << pipeline.project.slug >>/deploy-dev
+          filters:
+            branches:
+              only: develop
+            tags:
+              ignore: /.*/
+      - approve-prod:
+          type: approval
+          requires: [build]
+          filters:
+            branches:
+              only: master
+            tags:
+              ignore: /.*/
+      - deploy:
+          name: deploy-prod
+          environment: prod
+          requires: [approve-prod]
+          context: files-api-v6-prod-deploy
+          serial-group: << pipeline.project.slug >>/deploy-prod
+          filters:
+            branches:
+              only: master
+            tags:
+              ignore: /.*/
