@@ -41,6 +41,8 @@ describe('Files API HTTP contract', () => {
   beforeAll(async () => {
     Object.assign(process.env, {
       AUTH_SECRET: secret,
+      ACCESS_CONTROL_BLOCKED_USER_IDS: '456',
+      ACCESS_CONTROL_BLOCKED_SUBJECTS: 'auth0|blocked',
       VALID_ISSUERS: '["https://issuer.example"]',
       AWS_REGION: 'us-east-1',
       UPLOAD_SIGNING_SECRET: 'test-only-upload-secret-at-least-32-bytes',
@@ -81,7 +83,12 @@ describe('Files API HTTP contract', () => {
     ['missing token', undefined],
     ['invalid signature', 'invalid.token.signature'],
     ['expired token', token({ exp: 1 })],
-    ['unverified member', token({ email_verified: false })],
+    ['blocked member', token({ userId: '456', email_verified: undefined })],
+    [
+      'blocked subject',
+      token({ sub: 'auth0|blocked', email_verified: undefined }),
+    ],
+    ['missing member identity', token({ userId: undefined })],
     ['wrong issuer', token({ iss: 'https://untrusted.example' })],
     [
       'machine token',
@@ -94,6 +101,24 @@ describe('Files API HTTP contract', () => {
     if (authorization) call.set('Authorization', `Bearer ${authorization}`);
     await call.send(file).expect(401);
   });
+
+  it.each([undefined, false, true])(
+    'temporarily accepts authenticated members with email_verified=%s',
+    async (emailVerified) => {
+      await request(app.getHttpServer())
+        .post('/v6/uploads/files/sessions')
+        .set(
+          'Authorization',
+          `Bearer ${token({
+            userId: undefined,
+            'https://topcoder.com/userId': '123',
+            email_verified: emailVerified,
+          })}`,
+        )
+        .send({ ...file, purpose: 'support' })
+        .expect(201);
+    },
+  );
 
   it('creates and signs uploads and resolves a read capability without exposing its upload grant', async () => {
     const auth = `Bearer ${token()}`;

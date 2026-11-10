@@ -29,7 +29,7 @@
     "express": "5.2.1",
     "reflect-metadata": "0.2.2",
     "rxjs": "7.8.2",
-    "tc-core-library-js": "https://codeload.github.com/topcoder-platform/tc-core-library-js/tar.gz/c2df92b2227089909ab6e229df0ec6b658bb431a"
+    "tc-core-library-js": "https://codeload.github.com/topcoder-platform/tc-core-library-js/tar.gz/58de37670180e183e8378c3d203df0112a0414f6"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
