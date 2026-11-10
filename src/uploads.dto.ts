@@ -17,6 +17,7 @@ export const UPLOAD_PURPOSES = [
   'forum',
   'project',
   'showcase',
+  'support',
 ] as const;
 export type UploadPurpose = (typeof UPLOAD_PURPOSES)[number];
 

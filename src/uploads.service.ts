@@ -19,6 +19,10 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createHmac, randomUUID, timingSafeEqual } from 'crypto';
 import { JwtUser } from './auth';
 import { UploadControls } from './upload-controls';
+import {
+  MAX_SUPPORT_ATTACHMENT_BYTES,
+  validateSupportFile,
+} from './support-files';
 import { CreateUploadDto, SignUploadDto, UploadPurpose } from './uploads.dto';
 
 export const UPLOAD_PART_SIZE = 10 * 1024 * 1024;
@@ -39,6 +43,7 @@ const bucketVariables: Record<UploadPurpose, string> = {
   cv: 'UPLOAD_ATTACHMENT_BUCKET',
   engagement: 'UPLOAD_ATTACHMENT_BUCKET',
   review: 'UPLOAD_ATTACHMENT_BUCKET',
+  support: 'UPLOAD_ATTACHMENT_BUCKET',
   forum: 'UPLOAD_FORUM_BUCKET',
   project: 'UPLOAD_PROJECT_BUCKET',
   showcase: 'UPLOAD_SHOWCASE_BUCKET',
@@ -105,11 +110,13 @@ export class UploadsService {
   async create(input: CreateUploadDto, user: JwtUser) {
     const userId = this.member(user);
     const maxSize =
-      input.purpose === 'cv'
-        ? 8 * 1024 * 1024
-        : input.purpose === 'forum'
-          ? 25 * 1024 * 1024
-          : 500 * 1024 * 1024;
+      (
+        {
+          cv: 8 * 1024 * 1024,
+          forum: 25 * 1024 * 1024,
+          support: MAX_SUPPORT_ATTACHMENT_BYTES,
+        } as Partial<Record<UploadPurpose, number>>
+      )[input.purpose] ?? 500 * 1024 * 1024;
     if (
       !Number.isInteger(input.size) ||
       input.size < 1 ||
@@ -124,6 +131,9 @@ export class UploadsService {
     }
     if (input.purpose === 'cv' && !/\.(pdf|docx)$/i.test(input.filename)) {
       throw new BadRequestException('CVs must be PDF or DOCX files.');
+    }
+    if (input.purpose === 'support') {
+      validateSupportFile(input.filename, input.contentType);
     }
     const variable = bucketVariables[input.purpose];
     if (!variable) throw new BadRequestException('Unsupported upload purpose.');

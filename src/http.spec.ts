@@ -123,6 +123,32 @@ describe('Files API HTTP contract', () => {
       .expect(403);
   });
 
+  it('accepts Support sessions on the shared authenticated API and rejects files beyond its boundary', async () => {
+    const auth = `Bearer ${token()}`;
+    const support = {
+      purpose: 'support',
+      filename: 'screenshot.png',
+      contentType: 'image/png',
+      size: 2 * 1024 * 1024,
+    };
+    const response = await request(app.getHttpServer())
+      .post('/v6/uploads/files/sessions')
+      .set('Authorization', auth)
+      .send(support)
+      .expect(201);
+    expect(response.body.key).toMatch(/^uppy\/support\//);
+    await request(app.getHttpServer())
+      .post('/v6/uploads/files/sessions')
+      .set('Authorization', auth)
+      .send({ ...support, size: support.size + 1 })
+      .expect(400);
+    await request(app.getHttpServer())
+      .post('/v6/uploads/files/sessions')
+      .set('Authorization', auth)
+      .send({ ...support, contentType: 'text/html' })
+      .expect(400);
+  });
+
   it('returns 429 with Retry-After when the shared quota is exhausted', async () => {
     controls.reserve.mockRejectedValueOnce(new UploadLimitException(90));
     const response = await request(app.getHttpServer())

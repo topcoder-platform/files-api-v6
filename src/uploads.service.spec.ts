@@ -88,6 +88,70 @@ describe('Uppy S3 uploads', () => {
       );
     expect(controls.reserve).not.toHaveBeenCalled();
   });
+  it('reserves an inclusive two-MiB Support file and signs only that size in the attachment bucket', async () => {
+    const session = await service.create(
+      {
+        purpose: 'support',
+        filename: 'evidence.pdf',
+        contentType: 'application/pdf',
+        size: 2 * 1024 * 1024,
+      },
+      member,
+    );
+    expect(session.bucket).toBe('attachments');
+    expect(session.key).toMatch(/^uppy\/support\/[^/]+\/evidence.pdf$/);
+    expect(session.url).toMatch(/^https:\/\/api.example\/v6\/uploads\/files\//);
+    expect(controls.reserve).toHaveBeenCalledWith(
+      '123',
+      session.key,
+      2 * 1024 * 1024,
+      expect.any(Number),
+    );
+    await service.sign(
+      { token: session.token, key: session.key, method: 'PUT' },
+      member,
+    );
+    expect((signed.mock.calls[0][1] as any).input.ContentLength).toBe(
+      2 * 1024 * 1024,
+    );
+  });
+  it('enforces the Support size and extension/MIME contract before reserving quota', async () => {
+    const support = {
+      purpose: 'support' as const,
+      filename: 'notes.txt',
+      contentType: 'text/plain',
+      size: 1,
+    };
+    for (const input of [
+      { ...support, size: 0 },
+      { ...support, size: 2 * 1024 * 1024 + 1 },
+      { ...support, filename: 'image.svg', contentType: 'image/svg+xml' },
+      { ...support, filename: 'page.html', contentType: 'text/html' },
+      { ...support, contentType: 'application/json' },
+      { ...support, filename: 'file.exe' },
+    ])
+      await expect(service.create(input, member)).rejects.toThrow(
+        BadRequestException,
+      );
+    expect(controls.reserve).not.toHaveBeenCalled();
+  });
+  it('retains Support archive aliases and safely delivers structured text attachments', async () => {
+    for (const [filename, contentType] of [
+      ['archive.GZ', 'application/x-gzip'],
+      ['archive.rar', 'application/x-rar-compressed'],
+      ['data.xml', 'text/xml'],
+      ['data.json', 'application/json'],
+    ]) {
+      const session = await service.create(
+        { purpose: 'support', filename, contentType, size: 10 },
+        member,
+      );
+      await service.download(session.url.split('/').at(-1)!);
+      const input = (signed.mock.calls.at(-1)?.[1] as any).input;
+      expect(input.ResponseContentDisposition).toMatch(/^attachment;/);
+      expect(input.ResponseContentType).toBe('application/octet-stream');
+    }
+  });
   it('never returns a grant when shared quota reservation fails', async () => {
     controls.reserve.mockRejectedValue(new Error('quota unavailable'));
     await expect(service.create(file, member)).rejects.toThrow(
