@@ -18,6 +18,7 @@ import {
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createHmac, randomUUID, timingSafeEqual } from 'crypto';
 import { JwtUser } from './auth';
+import { UploadControls } from './upload-controls';
 import { CreateUploadDto, SignUploadDto, UploadPurpose } from './uploads.dto';
 
 export const UPLOAD_PART_SIZE = 10 * 1024 * 1024;
@@ -45,8 +46,11 @@ const bucketVariables: Record<UploadPurpose, string> = {
 
 @Injectable()
 export class UploadsService {
+  constructor(private readonly controls: UploadControls) {}
   private readonly s3 = new S3Client({
     region: process.env.AWS_REGION || 'us-east-1',
+    // Multipart allocation must not be retried after an ambiguous response.
+    maxAttempts: 1,
     // Uppy 6.0 supplies the request body in the browser. Do not sign the SDK's
     // automatically generated checksum for an empty server-side body.
     requestChecksumCalculation: 'WHEN_REQUIRED',
@@ -79,6 +83,7 @@ export class UploadsService {
 
   private decode(scope: string, token: string): UploadGrant {
     try {
+      if (token.length > 4096) throw new Error();
       const [payload, signature, extra] = token.split('.');
       if (!payload || !signature || extra) throw new Error();
       const expected = this.mac(scope, payload);
@@ -97,7 +102,7 @@ export class UploadsService {
     }
   }
 
-  create(input: CreateUploadDto, user: JwtUser) {
+  async create(input: CreateUploadDto, user: JwtUser) {
     const userId = this.member(user);
     const maxSize =
       input.purpose === 'cv'
@@ -139,6 +144,7 @@ export class UploadsService {
       userId,
       expires: Date.now() + 24 * 60 * 60 * 1000,
     };
+    await this.controls.reserve(userId, key, input.size, grant.expires);
     const storageUrl = `https://s3.amazonaws.com/${bucket}/${key.split('/').map(encodeURIComponent).join('/')}`;
     // Submission URLs must remain S3 URLs for the existing virus-scan pipeline.
     // Other files use an unguessable, durable read capability like the former
@@ -171,24 +177,36 @@ export class UploadsService {
         'Upload grant does not authorize this request.',
       );
     }
+    await this.controls.throttle(userId, 'sign');
+    const state = await this.controls.state(grant.key);
     const base = { Bucket: grant.bucket, Key: grant.key };
     let command;
     if (!input.uploadId) {
       if (input.partNumber !== undefined)
         throw new BadRequestException('Unexpected part number.');
       if (input.method === 'PUT') {
+        await this.controls.selectSingle(grant.key);
         command = new PutObjectCommand({
           ...base,
           ContentLength: grant.size,
           ContentType: grant.contentType,
         });
       } else if (input.method === 'POST') {
-        command = new CreateMultipartUploadCommand({
-          ...base,
-          ContentType: grant.contentType,
-        });
+        if (state.mode && state.mode !== 'multipart')
+          throw new ForbiddenException(
+            'Upload session cannot change upload mode.',
+          );
+        // Uppy accepts a signed operation URL. Serve its expected S3 XML here
+        // so replaying creation returns the same allocation, without client changes.
+        return {
+          url: `${this.configuration('UPLOAD_PUBLIC_API_URL').replace(/\/$/, '')}/multipart/${input.token}`,
+        };
       } else throw new BadRequestException('Unsupported upload operation.');
     } else {
+      if (state.mode !== 'multipart' || state.uploadId !== input.uploadId)
+        throw new ForbiddenException(
+          'Multipart upload does not belong to this session.',
+        );
       const multipart = { ...base, UploadId: input.uploadId };
       if (input.method === 'PUT') {
         const part = input.partNumber;
@@ -221,11 +239,8 @@ export class UploadsService {
     }
     // Narrow the S3 command before signing: each SDK command has a distinct
     // middleware input/output type under strict TypeScript checking.
-    const options = { expiresIn: 15 * 60 };
+    const options = { expiresIn: 5 * 60 };
     if (command instanceof PutObjectCommand) {
-      return { url: await getSignedUrl(this.s3, command, options) };
-    }
-    if (command instanceof CreateMultipartUploadCommand) {
       return { url: await getSignedUrl(this.s3, command, options) };
     }
     if (command instanceof UploadPartCommand) {
@@ -240,11 +255,71 @@ export class UploadsService {
     return { url: await getSignedUrl(this.s3, command, options) };
   }
 
+  async createMultipart(token: string): Promise<string> {
+    const grant = this.decode('upload', token);
+    if (grant.expires < Date.now())
+      throw new ForbiddenException('Upload session expired.');
+    await this.controls.throttle(grant.userId, 'multipart');
+    let state = await this.controls.state(grant.key);
+    if (state.mode && state.mode !== 'multipart')
+      throw new ForbiddenException('Upload session cannot change upload mode.');
+    if (!state.uploadId && (await this.controls.claimMultipart(grant.key))) {
+      // Only the winning claimant can call S3. Never clear this claim on error:
+      // a lost response cannot be allowed to allocate unbounded orphan uploads.
+      const result = await this.s3.send(
+        new CreateMultipartUploadCommand({
+          Bucket: grant.bucket,
+          Key: grant.key,
+          ContentType: grant.contentType,
+        }),
+      );
+      if (!result.UploadId)
+        throw new ServiceUnavailableException(
+          'Could not start multipart upload.',
+        );
+      try {
+        await this.controls.saveMultipart(grant.key, result.UploadId);
+      } catch (error) {
+        await this.s3
+          .send(
+            new AbortMultipartUploadCommand({
+              Bucket: grant.bucket,
+              Key: grant.key,
+              UploadId: result.UploadId,
+            }),
+          )
+          .catch(() => undefined);
+        throw error;
+      }
+      state = { mode: 'multipart', uploadId: result.UploadId };
+    } else if (!state.uploadId) {
+      state = await this.controls.state(grant.key);
+    }
+    if (!state.uploadId)
+      throw new ServiceUnavailableException(
+        'Multipart initialization is pending. Retry shortly or create a new session.',
+      );
+    const escape = (value: string) =>
+      value.replace(
+        /[&<>"']/g,
+        (c) =>
+          ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&apos;',
+          })[c]!,
+      );
+    return `<InitiateMultipartUploadResult><Bucket>${escape(grant.bucket)}</Bucket><Key>${escape(grant.key)}</Key><UploadId>${escape(state.uploadId)}</UploadId></InitiateMultipartUploadResult>`;
+  }
+
   async download(token: string): Promise<string> {
     const grant = this.decode('download', token);
     // No capability can expose a competition submission, including a DMZ ZIP.
     if (grant.purpose === 'submission')
       throw new ForbiddenException('Use submission download authorization.');
+    await this.controls.throttle(grant.key, 'download');
     const inline = /^(image\/(png|jpeg|gif|webp|avif)|application\/pdf)$/.test(
       grant.contentType,
     );

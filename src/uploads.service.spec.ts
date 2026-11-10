@@ -3,8 +3,11 @@ import {
   ForbiddenException,
   UnauthorizedException,
 } from '@nestjs/common';
+import { CreateMultipartUploadCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { createHmac } from 'node:crypto';
 import { UPLOAD_PART_SIZE, UploadsService } from './uploads.service';
+import { UploadControls } from './upload-controls';
 
 jest.mock('@aws-sdk/s3-request-presigner', () => ({
   getSignedUrl: jest.fn().mockResolvedValue('https://signed.example/file'),
@@ -20,6 +23,14 @@ const file = {
 
 describe('Uppy S3 uploads', () => {
   let service: UploadsService;
+  let controls: {
+    reserve: jest.Mock;
+    throttle: jest.Mock;
+    state: jest.Mock;
+    selectSingle: jest.Mock;
+    claimMultipart: jest.Mock;
+    saveMultipart: jest.Mock;
+  };
   beforeEach(() => {
     Object.assign(process.env, {
       UPLOAD_SIGNING_SECRET: 'test-only-upload-secret',
@@ -31,130 +42,195 @@ describe('Uppy S3 uploads', () => {
       UPLOAD_SHOWCASE_CDN_URL: 'https://showcase.example',
       UPLOAD_PUBLIC_API_URL: 'https://api.example/v6/uploads/files',
     });
-    service = new UploadsService();
+    controls = {
+      reserve: jest.fn().mockResolvedValue(undefined),
+      throttle: jest.fn().mockResolvedValue(undefined),
+      state: jest.fn().mockResolvedValue({}),
+      selectSingle: jest.fn().mockResolvedValue(undefined),
+      claimMultipart: jest.fn().mockResolvedValue(true),
+      saveMultipart: jest.fn().mockResolvedValue(undefined),
+    };
+    service = new UploadsService(controls as unknown as UploadControls);
     signed.mockClear();
   });
+  afterEach(() => jest.restoreAllMocks());
 
-  it('keeps submissions in the DMZ and issues unique server-owned keys', () => {
-    const one = service.create(file, member);
+  it('reserves the full size before returning server-owned submission keys and private storage URLs', async () => {
+    const one = await service.create(file, member);
     expect(one.bucket).toBe('submission-dmz');
     expect(one.url).toMatch(
       /^https:\/\/s3\.amazonaws\.com\/submission-dmz\/uppy\/submission\//,
     );
-    expect(one.key).not.toBe(service.create(file, member).key);
+    expect(one.key).not.toBe((await service.create(file, member)).key);
     expect(one.partSize).toBe(UPLOAD_PART_SIZE);
-  });
-
-  it('requires a member and limits ZIP and CV types and sizes', () => {
-    expect(() => service.create(file, undefined as any)).toThrow(
-      UnauthorizedException,
-    );
-    expect(() => service.create(file, { ...member, isMachine: true })).toThrow(
-      UnauthorizedException,
-    );
-    expect(() =>
-      service.create({ ...file, filename: 'code.js' }, member),
-    ).toThrow(BadRequestException);
-    expect(() =>
-      service.create(
-        { ...file, purpose: 'cv', filename: 'cv.doc', size: 20 },
-        member,
-      ),
-    ).toThrow(BadRequestException);
-    expect(() =>
-      service.create({ ...file, purpose: 'cv', filename: 'cv.pdf' }, member),
-    ).toThrow(BadRequestException);
-    expect(() => service.create({ ...file, size: 0 }, member)).toThrow(
-      BadRequestException,
+    expect(controls.reserve).toHaveBeenCalledWith(
+      '123',
+      one.key,
+      file.size,
+      expect.any(Number),
     );
   });
-
-  it('rejects modified grants, other members, expired grants and arbitrary keys', async () => {
-    const session = service.create(file, member);
-    const request = {
-      token: session.token,
-      key: session.key,
-      method: 'PUT' as const,
-    };
-    await expect(
-      service.sign({ ...request, token: `${session.token}x` }, member),
-    ).rejects.toThrow(ForbiddenException);
-    await expect(
-      service.sign(request, { ...member, userId: '456' }),
-    ).rejects.toThrow(ForbiddenException);
-    await expect(
-      service.sign({ ...request, key: 'existing/private.zip' }, member),
-    ).rejects.toThrow(ForbiddenException);
-    const now = jest
-      .spyOn(Date, 'now')
-      .mockReturnValue(Date.now() + 25 * 60 * 60 * 1000);
-    await expect(service.sign(request, member)).rejects.toThrow(
-      ForbiddenException,
+  it('requires a member and validates file types and sizes before reserving quota', async () => {
+    await expect(service.create(file, undefined as any)).rejects.toThrow(
+      UnauthorizedException,
     );
-    now.mockRestore();
+    await expect(
+      service.create(file, { ...member, isMachine: true }),
+    ).rejects.toThrow(UnauthorizedException);
+    for (const input of [
+      { ...file, filename: 'code.js' },
+      { ...file, purpose: 'cv' as const, filename: 'cv.doc', size: 20 },
+      { ...file, purpose: 'cv' as const, filename: 'cv.pdf' },
+      { ...file, size: 0 },
+    ])
+      await expect(service.create(input, member)).rejects.toThrow(
+        BadRequestException,
+      );
+    expect(controls.reserve).not.toHaveBeenCalled();
+  });
+  it('never returns a grant when shared quota reservation fails', async () => {
+    controls.reserve.mockRejectedValue(new Error('quota unavailable'));
+    await expect(service.create(file, member)).rejects.toThrow(
+      'quota unavailable',
+    );
     expect(signed).not.toHaveBeenCalled();
   });
-
-  it('signs PUT and the full multipart lifecycle with bounded part sizes', async () => {
-    const session = service.create(file, member);
-    const request = {
+  it('rejects tampering, other members, expiry and arbitrary keys before spending signing capacity', async () => {
+    const session = await service.create(file, member);
+    const input = {
       token: session.token,
       key: session.key,
       method: 'PUT' as const,
     };
-    await service.sign(request, member);
+    await expect(
+      service.sign({ ...input, token: `${session.token}x` }, member),
+    ).rejects.toThrow(ForbiddenException);
+    await expect(
+      service.sign(input, { ...member, userId: '456' }),
+    ).rejects.toThrow(ForbiddenException);
+    await expect(
+      service.sign({ ...input, key: 'existing/private.zip' }, member),
+    ).rejects.toThrow(ForbiddenException);
+    jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 25 * 3600000);
+    await expect(service.sign(input, member)).rejects.toThrow(
+      ForbiddenException,
+    );
+    expect(signed).not.toHaveBeenCalled();
+    expect(controls.throttle).not.toHaveBeenCalled();
+  });
+  it('bounds signed PUT size and lifetime and never signs multipart allocation URLs for S3', async () => {
+    const session = await service.create(file, member);
+    const input = {
+      token: session.token,
+      key: session.key,
+      method: 'PUT' as const,
+    };
+    await service.sign(input, member);
     expect((signed.mock.calls[0][1] as any).input.ContentLength).toBe(
       file.size,
     );
-    const cases = [
-      { method: 'POST', command: 'CreateMultipartUploadCommand' },
-      {
-        method: 'PUT',
-        uploadId: 'multipart-id',
-        partNumber: 1,
-        command: 'UploadPartCommand',
-      },
-      {
-        method: 'PUT',
-        uploadId: 'multipart-id',
-        partNumber: 2,
-        command: 'UploadPartCommand',
-      },
-      { method: 'GET', uploadId: 'multipart-id', command: 'ListPartsCommand' },
-      {
-        method: 'POST',
-        uploadId: 'multipart-id',
-        command: 'CompleteMultipartUploadCommand',
-      },
-      {
-        method: 'DELETE',
-        uploadId: 'multipart-id',
-        command: 'AbortMultipartUploadCommand',
-      },
-    ];
-    for (const { command, ...operation } of cases) {
-      await service.sign({ ...request, ...operation } as any, member);
-      expect(signed.mock.calls.at(-1)?.[1].constructor.name).toBe(command);
+    expect(signed.mock.calls[0][2]).toEqual({ expiresIn: 300 });
+    expect(controls.selectSingle).toHaveBeenCalledWith(session.key);
+    const start = await service.sign({ ...input, method: 'POST' }, member);
+    expect(start.url).toBe(
+      `https://api.example/v6/uploads/files/multipart/${session.token}`,
+    );
+    expect(signed).toHaveBeenCalledTimes(1);
+  });
+  it('binds multipart signing to the single server-recorded allocation and exact part lengths', async () => {
+    const session = await service.create(file, member);
+    const input = {
+      token: session.token,
+      key: session.key,
+      method: 'PUT' as const,
+      uploadId: 'server-allocation',
+    };
+    controls.state.mockResolvedValue({
+      mode: 'multipart',
+      uploadId: 'server-allocation',
+    });
+    for (const [operation, name] of [
+      [{ method: 'PUT', partNumber: 1 }, 'UploadPartCommand'],
+      [{ method: 'PUT', partNumber: 2 }, 'UploadPartCommand'],
+      [{ method: 'GET' }, 'ListPartsCommand'],
+      [{ method: 'POST' }, 'CompleteMultipartUploadCommand'],
+      [{ method: 'DELETE' }, 'AbortMultipartUploadCommand'],
+    ] as const) {
+      await service.sign({ ...input, ...operation }, member);
+      expect(signed.mock.calls.at(-1)?.[1].constructor.name).toBe(name);
     }
-    expect((signed.mock.calls[2][1] as any).input.ContentLength).toBe(
+    expect((signed.mock.calls[0][1] as any).input.ContentLength).toBe(
       UPLOAD_PART_SIZE,
     );
-    expect((signed.mock.calls[3][1] as any).input.ContentLength).toBe(
+    expect((signed.mock.calls[1][1] as any).input.ContentLength).toBe(
       5 * 1024 * 1024,
     );
     await expect(
-      service.sign({ ...request, method: 'DELETE' }, member),
-    ).rejects.toThrow(BadRequestException);
+      service.sign({ ...input, uploadId: 'unrecorded', partNumber: 1 }, member),
+    ).rejects.toThrow(ForbiddenException);
     await expect(
-      service.sign({ ...request, uploadId: 'id', partNumber: 3 }, member),
-    ).rejects.toThrow(BadRequestException);
-    await expect(
-      service.sign({ ...request, method: 'GET' }, member),
+      service.sign({ ...input, partNumber: 3 }, member),
     ).rejects.toThrow(BadRequestException);
   });
-
-  it('provides durable read capabilities without allowing them to authorize writes', async () => {
-    const session = service.create(
+  it('returns the recorded upload ID on creation replay without allocating another upload', async () => {
+    const session = await service.create(file, member);
+    const send = jest
+      .spyOn(S3Client.prototype, 'send')
+      .mockResolvedValue({ UploadId: 'one&only' } as never);
+    expect(await service.createMultipart(session.token)).toContain(
+      '<UploadId>one&amp;only</UploadId>',
+    );
+    expect(send.mock.calls[0][0]).toBeInstanceOf(CreateMultipartUploadCommand);
+    expect(controls.saveMultipart).toHaveBeenCalledWith(
+      session.key,
+      'one&only',
+    );
+    controls.state.mockResolvedValue({
+      mode: 'multipart',
+      uploadId: 'one&only',
+    });
+    await service.createMultipart(session.token);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+  it('losing concurrent initializers cannot allocate another S3 upload', async () => {
+    const session = await service.create(file, member);
+    controls.claimMultipart.mockResolvedValue(false);
+    controls.state
+      .mockResolvedValueOnce({})
+      .mockResolvedValue({ mode: 'multipart', uploadId: 'winner' });
+    const send = jest.spyOn(S3Client.prototype, 'send');
+    expect(await service.createMultipart(session.token)).toContain(
+      '<UploadId>winner</UploadId>',
+    );
+    expect(send).not.toHaveBeenCalled();
+  });
+  it('rejects a single/multipart mode switch and fails closed while initialization is unresolved', async () => {
+    const session = await service.create(file, member);
+    const send = jest.spyOn(S3Client.prototype, 'send');
+    controls.state.mockResolvedValue({ mode: 'single' });
+    await expect(service.createMultipart(session.token)).rejects.toThrow(
+      ForbiddenException,
+    );
+    controls.state.mockResolvedValue({ mode: 'multipart' });
+    controls.claimMultipart.mockResolvedValue(false);
+    await expect(service.createMultipart(session.token)).rejects.toThrow(
+      'Multipart initialization is pending',
+    );
+    expect(send).not.toHaveBeenCalled();
+  });
+  it('never gives submission grants download access, even with a valid download-scope signature', async () => {
+    const session = await service.create(file, member);
+    const payload = session.token.split('.')[0];
+    const signature = createHmac('sha256', process.env.UPLOAD_SIGNING_SECRET!)
+      .update(`download:${payload}`)
+      .digest('base64url');
+    await expect(service.download(`${payload}.${signature}`)).rejects.toThrow(
+      'Use submission download authorization.',
+    );
+    expect(signed).not.toHaveBeenCalled();
+  });
+  it('preserves durable attachment links and keeps upload and download scopes separate', async () => {
+    const session = await service.create(
       {
         ...file,
         purpose: 'cv',
@@ -165,7 +241,6 @@ describe('Uppy S3 uploads', () => {
       member,
     );
     const token = session.url.split('/').at(-1)!;
-    expect(session.bucket).toBe('attachments');
     await expect(service.download(token)).resolves.toBe(
       'https://signed.example/file',
     );
@@ -178,35 +253,29 @@ describe('Uppy S3 uploads', () => {
     await expect(service.download(session.token)).rejects.toThrow(
       ForbiddenException,
     );
-  });
-
-  it('preserves the DOCX MIME type for CV preview while serving an attachment', async () => {
-    const contentType =
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-    const session = service.create(
-      { ...file, purpose: 'cv', filename: 'cv.docx', contentType, size: 100 },
-      member,
+    jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 10 * 86400000);
+    await expect(service.download(token)).resolves.toBe(
+      'https://signed.example/file',
     );
-    await service.download(session.url.split('/').at(-1)!);
-    const input = (signed.mock.calls.at(-1)?.[1] as any).input;
-    expect(input.ResponseContentType).toBe(contentType);
-    expect(input.ResponseContentDisposition).toMatch(/^attachment;/);
   });
-
-  it('forces active content to download and preserves each destination', async () => {
+  it('preserves DOCX MIME type and forces active content to download for every attachment destination', async () => {
     for (const [purpose, bucket] of [
+      ['cv', 'attachments'],
       ['forum', 'forum-files'],
       ['project', 'project-files'],
       ['showcase', 'showcase-files'],
       ['engagement', 'attachments'],
       ['review', 'attachments'],
     ] as const) {
-      const session = service.create(
+      const session = await service.create(
         {
           ...file,
           purpose,
-          filename: 'notes.html',
-          contentType: 'text/html',
+          filename: purpose === 'cv' ? 'cv.docx' : 'notes.html',
+          contentType:
+            purpose === 'cv'
+              ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+              : 'text/html',
           size: 100,
         },
         member,
@@ -214,10 +283,13 @@ describe('Uppy S3 uploads', () => {
       expect(session.bucket).toBe(bucket);
       if (purpose !== 'showcase') {
         await service.download(session.url.split('/').at(-1)!);
-        expect(
-          (signed.mock.calls.at(-1)?.[1] as any).input
-            .ResponseContentDisposition,
-        ).toMatch(/^attachment;/);
+        const input = (signed.mock.calls.at(-1)?.[1] as any).input;
+        expect(input.ResponseContentDisposition).toMatch(/^attachment;/);
+        expect(input.ResponseContentType).toBe(
+          purpose === 'cv'
+            ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+            : 'application/octet-stream',
+        );
       }
     }
   });

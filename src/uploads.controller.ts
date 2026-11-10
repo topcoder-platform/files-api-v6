@@ -3,6 +3,7 @@ import {
   Controller,
   Get,
   Header,
+  HttpCode,
   Param,
   Post,
   Redirect,
@@ -32,6 +33,14 @@ export class UploadsController {
   @UseGuards(MemberGuard)
   sign(@Body() input: SignUploadDto, @Req() req: MemberRequest) {
     return this.uploads.sign(input, req.user);
+  }
+
+  @Post('multipart/:token')
+  @HttpCode(200)
+  @Header('Content-Type', 'application/xml')
+  @Header('Cache-Control', 'no-store')
+  createMultipart(@Param('token') token: string) {
+    return this.uploads.createMultipart(token);
   }
 
   @Get(':token')

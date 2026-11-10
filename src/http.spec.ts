@@ -3,6 +3,8 @@ import { Test } from '@nestjs/testing';
 import { createHmac } from 'node:crypto';
 import request from 'supertest';
 import { AppModule } from './app.module';
+import { UploadControls, UploadLimitException } from './upload-controls';
+import { UploadLimitFilter } from './request-controls';
 
 jest.mock('@aws-sdk/s3-request-presigner', () => ({
   getSignedUrl: jest.fn().mockResolvedValue('https://signed.example/file'),
@@ -30,6 +32,12 @@ function token(claims: Record<string, unknown> = {}) {
 
 describe('Files API HTTP contract', () => {
   let app: INestApplication;
+  const controls = {
+    reserve: jest.fn().mockResolvedValue(undefined),
+    throttle: jest.fn().mockResolvedValue(undefined),
+    state: jest.fn().mockResolvedValue({}),
+    selectSingle: jest.fn().mockResolvedValue(undefined),
+  };
   beforeAll(async () => {
     Object.assign(process.env, {
       AUTH_SECRET: secret,
@@ -41,9 +49,13 @@ describe('Files API HTTP contract', () => {
     });
     const module = await Test.createTestingModule({
       imports: [AppModule],
-    }).compile();
+    })
+      .overrideProvider(UploadControls)
+      .useValue(controls)
+      .compile();
     app = module.createNestApplication();
     app.setGlobalPrefix('v6');
+    app.useGlobalFilters(new UploadLimitFilter());
     app.useGlobalPipes(
       new ValidationPipe({
         whitelist: true,
@@ -109,6 +121,17 @@ describe('Files API HTTP contract', () => {
     await request(app.getHttpServer())
       .get(`/v6/uploads/files/${session.token}`)
       .expect(403);
+  });
+
+  it('returns 429 with Retry-After when the shared quota is exhausted', async () => {
+    controls.reserve.mockRejectedValueOnce(new UploadLimitException(90));
+    const response = await request(app.getHttpServer())
+      .post('/v6/uploads/files/sessions')
+      .set('Authorization', `Bearer ${token()}`)
+      .send(file)
+      .expect(429);
+    expect(response.headers['retry-after']).toBe('90');
+    expect(response.body.retryAfter).toBe(90);
   });
 
   it('rejects caller-controlled destinations and invalid metadata before creating a grant', async () => {

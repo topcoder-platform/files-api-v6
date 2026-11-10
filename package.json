@@ -18,6 +18,7 @@
     "format": "prettier --write \"src/**/*.ts\""
   },
   "dependencies": {
+    "@aws-sdk/client-dynamodb": "3.1090.0",
     "@aws-sdk/client-s3": "3.1090.0",
     "@aws-sdk/s3-request-presigner": "3.1090.0",
     "@nestjs/common": "12.4.2",
@@ -25,13 +26,15 @@
     "@nestjs/platform-express": "12.4.2",
     "class-transformer": "0.5.1",
     "class-validator": "0.14.4",
+    "express": "5.2.1",
     "reflect-metadata": "0.2.2",
     "rxjs": "7.8.2",
-    "tc-core-library-js": "https://codeload.github.com/topcoder-platform/tc-core-library-js/tar.gz/c2df92b2227089909ab6e229df0ec6b658bb431a",
-    "express": "5.2.1"
+    "tc-core-library-js": "https://codeload.github.com/topcoder-platform/tc-core-library-js/tar.gz/c2df92b2227089909ab6e229df0ec6b658bb431a"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
+    "@nestjs/cli": "12.0.12",
+    "@nestjs/schematics": "12.0.13",
     "@nestjs/testing": "12.4.2",
     "@swc/core": "1.16.22",
     "@swc/jest": "0.2.39",
@@ -46,8 +49,6 @@
     "supertest": "7.3.2",
     "typescript": "6.0.3",
     "typescript-eslint": "8.72.2",
-    "@nestjs/cli": "12.0.12",
-    "@nestjs/schematics": "12.0.13",
     "typescript-native": "npm:typescript@7.0.2"
   },
   "overrides": {

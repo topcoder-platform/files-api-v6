@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import { requestBudget, UploadLimitFilter } from './request-controls';
 import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import type { Request, Response, NextFunction } from 'express';
@@ -6,6 +7,7 @@ import { AppModule } from './app.module';
 
 async function bootstrap() {
   for (const key of [
+    'UPLOAD_QUOTA_TABLE',
     'VALID_ISSUERS',
     'UPLOAD_SIGNING_SECRET',
     'UPLOAD_PUBLIC_API_URL',
@@ -25,7 +27,14 @@ async function bootstrap() {
   }
   const app = await NestFactory.create(AppModule, { bodyParser: false });
   const { json } = await import('express');
+  app.enableCors({
+    origin: process.env.CORS_ORIGINS!.split(',').map((value) => value.trim()),
+    credentials: true,
+    methods: ['GET', 'POST', 'OPTIONS'],
+  });
+  app.use(requestBudget());
   app.use(json({ limit: '16kb' }));
+  app.useGlobalFilters(new UploadLimitFilter());
   app.use((_req: Request, res: Response, next: NextFunction) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
@@ -39,11 +48,7 @@ async function bootstrap() {
       transform: true,
     }),
   );
-  app.enableCors({
-    origin: process.env.CORS_ORIGINS!.split(',').map((value) => value.trim()),
-    credentials: true,
-    methods: ['GET', 'POST', 'OPTIONS'],
-  });
+
   app.enableShutdownHooks();
   await app.listen(Number(process.env.PORT || 3000), '0.0.0.0');
 }
