@@ -100,6 +100,7 @@ export class UploadControls {
     key: string,
     size: number,
     expires: number,
+    download?: { token: string; grant: string },
   ): Promise<void> {
     const day = this.window(86400);
     const minute = this.window(60);
@@ -160,6 +161,21 @@ export class UploadControls {
                 ConditionExpression: 'attribute_not_exists(pk)',
               },
             },
+            // Read capabilities must outlive the expiring upload reservation.
+            ...(download
+              ? [
+                  {
+                    Put: {
+                      TableName: this.table(),
+                      Item: {
+                        pk: { S: `download:${identifier(download.token)}` },
+                        grant: { S: download.grant },
+                      },
+                      ConditionExpression: 'attribute_not_exists(pk)',
+                    },
+                  },
+                ]
+              : []),
           ],
         }),
       );
@@ -257,6 +273,25 @@ export class UploadControls {
         'Upload session expired. Create a new upload session.',
       );
     return { mode: item.mode?.S, uploadId: item.uploadId?.S };
+  }
+  async resolveDownload(token: string): Promise<string> {
+    let item;
+    try {
+      item = (
+        await this.db.send(
+          new GetItemCommand({
+            TableName: this.table(),
+            Key: { pk: { S: `download:${identifier(token)}` } },
+            ConsistentRead: true,
+          }),
+        )
+      ).Item;
+    } catch {
+      this.unavailable();
+    }
+    if (!item?.grant?.S)
+      throw new ForbiddenException('Invalid download handle.');
+    return item.grant.S;
   }
   async selectSingle(key: string): Promise<void> {
     try {
