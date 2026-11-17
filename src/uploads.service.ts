@@ -16,7 +16,7 @@ import {
   UploadPartCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { createHmac, randomUUID, timingSafeEqual } from 'crypto';
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
 import { JwtUser } from './auth';
 import { UploadControls } from './upload-controls';
 import {
@@ -154,7 +154,20 @@ export class UploadsService {
       userId,
       expires: Date.now() + 24 * 60 * 60 * 1000,
     };
-    await this.controls.reserve(userId, key, input.size, grant.expires);
+    const download =
+      input.purpose === 'submission' || input.purpose === 'showcase'
+        ? undefined
+        : {
+            token: randomBytes(24).toString('base64url'),
+            grant: this.encode('download', grant),
+          };
+    await this.controls.reserve(
+      userId,
+      key,
+      input.size,
+      grant.expires,
+      download,
+    );
     const storageUrl = `https://s3.amazonaws.com/${bucket}/${key.split('/').map(encodeURIComponent).join('/')}`;
     // Submission URLs must remain S3 URLs for the existing virus-scan pipeline.
     // Other files use an unguessable, durable read capability like the former
@@ -164,7 +177,7 @@ export class UploadsService {
         ? storageUrl
         : input.purpose === 'showcase'
           ? `${this.configuration('UPLOAD_SHOWCASE_CDN_URL').replace(/\/$/, '')}/${key}`
-          : `${this.configuration('UPLOAD_PUBLIC_API_URL').replace(/\/$/, '')}/${this.encode('download', grant)}`;
+          : `${this.configuration('UPLOAD_PUBLIC_API_URL').replace(/\/$/, '')}/${download!.token}`;
     return {
       token: this.encode('upload', grant),
       key,
@@ -325,7 +338,13 @@ export class UploadsService {
   }
 
   async download(token: string): Promise<string> {
-    const grant = this.decode('download', token);
+    // Keep resolving previously saved, self-contained download grants.
+    const grant = this.decode(
+      'download',
+      /^[A-Za-z0-9_-]{32}$/.test(token)
+        ? await this.controls.resolveDownload(token)
+        : token,
+    );
     // No capability can expose a competition submission, including a DMZ ZIP.
     if (grant.purpose === 'submission')
       throw new ForbiddenException('Use submission download authorization.');

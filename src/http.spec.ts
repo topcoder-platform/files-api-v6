@@ -32,8 +32,16 @@ function token(claims: Record<string, unknown> = {}) {
 
 describe('Files API HTTP contract', () => {
   let app: INestApplication;
+  const downloads = new Map<string, string>();
   const controls = {
-    reserve: jest.fn().mockResolvedValue(undefined),
+    reserve: jest
+      .fn()
+      .mockImplementation(async (_user, _key, _size, _expires, download) => {
+        if (download) downloads.set(download.token, download.grant);
+      }),
+    resolveDownload: jest
+      .fn()
+      .mockImplementation(async (handle) => downloads.get(handle)),
     throttle: jest.fn().mockResolvedValue(undefined),
     state: jest.fn().mockResolvedValue({}),
     selectSingle: jest.fn().mockResolvedValue(undefined),
@@ -130,7 +138,7 @@ describe('Files API HTTP contract', () => {
         .expect(201)
     ).body;
     expect(session.url).toMatch(
-      /^https:\/\/api\.example\/v6\/uploads\/files\/[^/]+$/,
+      /^https:\/\/api\.example\/v6\/uploads\/files\/[A-Za-z0-9_-]{32}$/,
     );
     expect(session.bucket).toBe('attachments');
     await request(app.getHttpServer())

@@ -30,6 +30,7 @@ describe('Uppy S3 uploads', () => {
     selectSingle: jest.Mock;
     claimMultipart: jest.Mock;
     saveMultipart: jest.Mock;
+    resolveDownload: jest.Mock;
   };
   beforeEach(() => {
     Object.assign(process.env, {
@@ -42,8 +43,18 @@ describe('Uppy S3 uploads', () => {
       UPLOAD_SHOWCASE_CDN_URL: 'https://showcase.example',
       UPLOAD_PUBLIC_API_URL: 'https://api.example/v6/uploads/files',
     });
+    const downloads = new Map<string, string>();
     controls = {
-      reserve: jest.fn().mockResolvedValue(undefined),
+      reserve: jest
+        .fn()
+        .mockImplementation(async (_user, _key, _size, _expires, download) => {
+          if (download) downloads.set(download.token, download.grant);
+        }),
+      resolveDownload: jest.fn().mockImplementation(async (token) => {
+        if (!downloads.has(token))
+          throw new ForbiddenException('Invalid download handle.');
+        return downloads.get(token);
+      }),
       throttle: jest.fn().mockResolvedValue(undefined),
       state: jest.fn().mockResolvedValue({}),
       selectSingle: jest.fn().mockResolvedValue(undefined),
@@ -68,6 +79,7 @@ describe('Uppy S3 uploads', () => {
       one.key,
       file.size,
       expect.any(Number),
+      undefined,
     );
   });
   it('requires a member and validates file types and sizes before reserving quota', async () => {
@@ -106,6 +118,10 @@ describe('Uppy S3 uploads', () => {
       session.key,
       2 * 1024 * 1024,
       expect.any(Number),
+      expect.objectContaining({
+        token: expect.any(String),
+        grant: expect.any(String),
+      }),
     );
     await service.sign(
       { token: session.token, key: session.key, method: 'PUT' },
@@ -321,6 +337,67 @@ describe('Uppy S3 uploads', () => {
     await expect(service.download(token)).resolves.toBe(
       'https://signed.example/file',
     );
+  });
+  it.each(['forum', 'review', 'project'] as const)(
+    'returns compact %s attachment links regardless of filename length',
+    async (purpose) => {
+      for (const filename of [
+        'bird-species-classification-master (2).zip',
+        `${'x'.repeat(240)} (1).mp4`,
+      ]) {
+        const session = await service.create(
+          { ...file, purpose, filename, contextId: '1001120' },
+          member,
+        );
+        expect(session.url).toMatch(
+          /^https:\/\/api\.example\/v6\/uploads\/files\/[A-Za-z0-9_-]{32}$/,
+        );
+        const handle = session.url.split('/').at(-1)!;
+        await service.download(handle);
+        expect((signed.mock.calls.at(-1)?.[1] as any).input).toMatchObject({
+          Bucket: session.bucket,
+          Key: session.key,
+          ResponseContentDisposition: `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,
+        });
+        expect(signed.mock.calls.at(-1)?.[2]).toEqual({ expiresIn: 300 });
+        expect(controls.throttle).toHaveBeenLastCalledWith(
+          session.key,
+          'download',
+        );
+        const changed = `${handle[0] === 'a' ? 'b' : 'a'}${handle.slice(1)}`;
+        await expect(service.download(changed)).rejects.toThrow(
+          ForbiddenException,
+        );
+      }
+      const handles = controls.reserve.mock.calls.map((call) => call[4].token);
+      expect(new Set(handles).size).toBe(handles.length);
+    },
+  );
+  it('continues resolving legacy long links without a handle lookup after upload expiry', async () => {
+    const session = await service.create({ ...file, purpose: 'forum' }, member);
+    const payload = session.token.split('.')[0];
+    const signature = createHmac('sha256', process.env.UPLOAD_SIGNING_SECRET!)
+      .update(`download:${payload}`)
+      .digest('base64url');
+    jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 30 * 86400000);
+    await expect(service.download(`${payload}.${signature}`)).resolves.toBe(
+      'https://signed.example/file',
+    );
+    expect(controls.resolveDownload).not.toHaveBeenCalled();
+    await expect(service.download(`${payload}.${signature}x`)).rejects.toThrow(
+      ForbiddenException,
+    );
+  });
+  it('does not issue read handles for submission or showcase URLs', async () => {
+    for (const purpose of ['submission', 'showcase'] as const) {
+      const session = await service.create({ ...file, purpose }, member);
+      expect(controls.reserve.mock.calls.at(-1)?.[4]).toBeUndefined();
+      expect(session.url).toBe(
+        purpose === 'submission'
+          ? session.storageUrl
+          : `https://showcase.example/${session.key}`,
+      );
+    }
   });
   it('preserves DOCX MIME type and forces active content to download for every attachment destination', async () => {
     for (const [purpose, bucket] of [
