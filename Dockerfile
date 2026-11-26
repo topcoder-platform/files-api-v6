@@ -12,7 +12,7 @@ RUN npm run lint && npm test && npm run build && npm prune --omit=dev --ignore-s
     && rm -f node_modules/tc-core-library-js/pnpm-lock.yaml
 
 FROM alpine:3.24 AS runtime
-RUN apk upgrade --no-cache && apk add --no-cache 'libcrypto3>=3.5.9-r1' 'libssl3>=3.5.9-r1' 'nodejs-current~26' 'nodejs-current>=26.13.1-r0' 'zlib>=1.4-r0' \
+RUN apk upgrade --no-cache && apk add --no-cache 'libcrypto3>=3.5.9-r1' 'libssl3>=3.5.9-r1' 'nodejs-current~26.13.1' 'zlib>=1.4-r0' \
     && addgroup -S app && adduser -S -D -H -u 10001 -G app app
 WORKDIR /app
 COPY --from=build --chown=app:app /app/node_modules ./node_modules
