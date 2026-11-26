@@ -52,9 +52,9 @@ The infrastructure migration rewrites legacy attachment URLs to this service and
 
 ## Development and deployment
 
-Use Node 26.12.1 or newer, `npm ci`, `npm run lint`, `npm test`, and `npm run build`. Supply runtime settings through your local environment or a private Docker env file. Never commit real values.
+Use Node 26.13.1, `npm ci`, `npm run lint`, `npm test`, and `npm run build`. Supply runtime settings through your local environment or a private Docker env file. Never commit real values.
 
-The Nest runtime and test libraries are pinned together at 12.4.2. Production builds use TypeScript 7.0.2 (`typescript-native`, an npm alias for the stable `typescript` package). Nest CLI 12.0.12, schematics 12.0.13, and ESLint currently require the older compiler API, so TypeScript 6.0.3 is retained only for that tooling. `npm run build` explicitly invokes the TypeScript 7 compiler; `npm run start:dev` uses the Nest CLI for local watch mode. This coexistence avoids unsupported peer overrides while using the latest stable compiler for releases.
+The Nest runtime and test libraries use 12.6.3. Production builds run the TypeScript 7.0.2 compiler via the `@typescript/native` npm alias. Nest CLI, schematics and ESLint use the TypeScript 6 compatibility API. Local watch mode runs through the Nest CLI.
 
 CircleCI builds/tests the image without AWS credentials. `develop` deploys to dev; `master` deploys to production after the standard approval job. Both use the pinned `tc-deploy-scripts` suite and repository/project/branch-bound OIDC. The ECS cluster, service, task family, container, and image repository are named `files-api-v6`.
 
